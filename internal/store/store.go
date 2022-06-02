@@ -45,6 +45,7 @@ import (
 	"github.com/kong/kubernetes-ingress-controller/v2/internal/annotations"
 	ctrlutils "github.com/kong/kubernetes-ingress-controller/v2/internal/controllers/utils"
 	kongv1 "github.com/kong/kubernetes-ingress-controller/v2/pkg/apis/configuration/v1"
+	kongv1alpha1 "github.com/kong/kubernetes-ingress-controller/v2/pkg/apis/configuration/v1alpha1"
 	kongv1beta1 "github.com/kong/kubernetes-ingress-controller/v2/pkg/apis/configuration/v1beta1"
 )
 
@@ -78,10 +79,12 @@ type Storer interface {
 	GetKongClusterPlugin(name string) (*kongv1.KongClusterPlugin, error)
 	GetKongConsumer(namespace, name string) (*kongv1.KongConsumer, error)
 	GetIngressClassV1(name string) (*networkingv1.IngressClass, error)
+	GetIngressClassParamsV1Alpha1() (*kongv1alpha1.IngressClassParams, error)
 
 	ListIngressesV1beta1() []*networkingv1beta1.Ingress
 	ListIngressesV1() []*networkingv1.Ingress
 	ListIngressClassesV1() []*networkingv1.IngressClass
+	ListIngressClassParamsV1Alpha1() []*kongv1alpha1.IngressClassParams
 	ListHTTPRoutes() ([]*gatewayv1alpha2.HTTPRoute, error)
 	ListUDPRoutes() ([]*gatewayv1alpha2.UDPRoute, error)
 	ListTCPRoutes() ([]*gatewayv1alpha2.TCPRoute, error)
@@ -134,12 +137,13 @@ type CacheStores struct {
 	ReferencePolicy cache.Store
 
 	// Kong Stores
-	Plugin        cache.Store
-	ClusterPlugin cache.Store
-	Consumer      cache.Store
-	KongIngress   cache.Store
-	TCPIngress    cache.Store
-	UDPIngress    cache.Store
+	Plugin                     cache.Store
+	ClusterPlugin              cache.Store
+	Consumer                   cache.Store
+	KongIngress                cache.Store
+	TCPIngress                 cache.Store
+	UDPIngress                 cache.Store
+	IngressClassParamsV1alpha1 cache.Store
 
 	// Knative Stores
 	KnativeIngress cache.Store
@@ -150,25 +154,31 @@ type CacheStores struct {
 // NewCacheStores is a convenience function for CacheStores to initialize all attributes with new cache stores
 func NewCacheStores() CacheStores {
 	return CacheStores{
-		IngressV1beta1:  cache.NewStore(keyFunc),
-		IngressV1:       cache.NewStore(keyFunc),
-		IngressClassV1:  cache.NewStore(clusterResourceKeyFunc),
-		Service:         cache.NewStore(keyFunc),
-		Secret:          cache.NewStore(keyFunc),
-		Endpoint:        cache.NewStore(keyFunc),
+		// Core Kubernetes Stores
+		IngressV1beta1: cache.NewStore(keyFunc),
+		IngressV1:      cache.NewStore(keyFunc),
+		IngressClassV1: cache.NewStore(clusterResourceKeyFunc),
+		Service:        cache.NewStore(keyFunc),
+		Secret:         cache.NewStore(keyFunc),
+		Endpoint:       cache.NewStore(keyFunc),
+		// Gateway API Stores
 		HTTPRoute:       cache.NewStore(keyFunc),
 		UDPRoute:        cache.NewStore(keyFunc),
 		TCPRoute:        cache.NewStore(keyFunc),
 		TLSRoute:        cache.NewStore(keyFunc),
 		ReferencePolicy: cache.NewStore(keyFunc),
-		Plugin:          cache.NewStore(keyFunc),
-		ClusterPlugin:   cache.NewStore(clusterResourceKeyFunc),
-		Consumer:        cache.NewStore(keyFunc),
-		KongIngress:     cache.NewStore(keyFunc),
-		TCPIngress:      cache.NewStore(keyFunc),
-		UDPIngress:      cache.NewStore(keyFunc),
-		KnativeIngress:  cache.NewStore(keyFunc),
-		l:               &sync.RWMutex{},
+		// Kong Stores
+		Plugin:                     cache.NewStore(keyFunc),
+		ClusterPlugin:              cache.NewStore(clusterResourceKeyFunc),
+		Consumer:                   cache.NewStore(keyFunc),
+		KongIngress:                cache.NewStore(keyFunc),
+		TCPIngress:                 cache.NewStore(keyFunc),
+		UDPIngress:                 cache.NewStore(keyFunc),
+		IngressClassParamsV1alpha1: cache.NewStore(keyFunc),
+		// Knative Stores
+		KnativeIngress: cache.NewStore(keyFunc),
+
+		l: &sync.RWMutex{},
 	}
 }
 
@@ -265,6 +275,8 @@ func (c CacheStores) Get(obj runtime.Object) (item interface{}, exists bool, err
 		return c.TCPIngress.Get(obj)
 	case *kongv1beta1.UDPIngress:
 		return c.UDPIngress.Get(obj)
+	case *kongv1alpha1.IngressClassParams:
+		return c.IngressClassParamsV1alpha1.Get(obj)
 	// ----------------------------------------------------------------------------
 	// 3rd Party API Support
 	// ----------------------------------------------------------------------------
@@ -326,6 +338,8 @@ func (c CacheStores) Add(obj runtime.Object) error {
 		return c.TCPIngress.Add(obj)
 	case *kongv1beta1.UDPIngress:
 		return c.UDPIngress.Add(obj)
+	case *kongv1alpha1.IngressClassParams:
+		return c.IngressClassParamsV1alpha1.Add(obj)
 	// ----------------------------------------------------------------------------
 	// 3rd Party API Support
 	// ----------------------------------------------------------------------------
@@ -388,6 +402,8 @@ func (c CacheStores) Delete(obj runtime.Object) error {
 		return c.TCPIngress.Delete(obj)
 	case *kongv1beta1.UDPIngress:
 		return c.UDPIngress.Delete(obj)
+	case *kongv1alpha1.IngressClassParams:
+		return c.IngressClassParamsV1alpha1.Delete(obj)
 	// ----------------------------------------------------------------------------
 	// 3rd Party API Support
 	// ----------------------------------------------------------------------------
@@ -400,7 +416,8 @@ func (c CacheStores) Delete(obj runtime.Object) error {
 
 // New creates a new object store to be used in the ingress controller
 func New(cs CacheStores, ingressClass string, processClasslessIngressV1Beta1 bool, processClasslessIngressV1 bool,
-	processClasslessKongConsumer bool, logger logrus.FieldLogger) Storer {
+	processClasslessKongConsumer bool, logger logrus.FieldLogger,
+) Storer {
 	var ingressV1Beta1ClassMatching annotations.ClassMatching
 	var ingressV1ClassMatching annotations.ClassMatching
 	var kongConsumerClassMatching annotations.ClassMatching
@@ -517,6 +534,28 @@ func (s Store) ListIngressClassesV1() []*networkingv1.IngressClass {
 	})
 
 	return classes
+}
+
+// ListIngressClassParamsV1Alpha1 returns the list of IngressClassParams in the Ingress v1alpha1 store.
+func (s Store) ListIngressClassParamsV1Alpha1() []*kongv1alpha1.IngressClassParams {
+	var classParams []*kongv1alpha1.IngressClassParams
+	for _, item := range s.stores.IngressClassParamsV1alpha1.List() {
+		classParam, ok := item.(*kongv1alpha1.IngressClassParams)
+		if !ok {
+			s.logger.Warnf("listIngressClassParamsV1alpha1: dropping object of unexpected type: %#v", item)
+			continue
+		}
+		classParams = append(classParams, classParam)
+	}
+
+	sort.SliceStable(classParams, func(i, j int) bool {
+		return strings.Compare(
+			fmt.Sprintf("%s/%s", classParams[i].Namespace, classParams[i].Name),
+			fmt.Sprintf("%s/%s", classParams[j].Namespace, classParams[j].Name),
+		) < 0
+	})
+
+	return classParams
 }
 
 // ListIngressesV1beta1 returns the list of Ingresses in the Ingress v1beta1 store.
@@ -769,6 +808,47 @@ func (s Store) GetIngressClassV1(name string) (*networkingv1.IngressClass, error
 	return p.(*networkingv1.IngressClass), nil
 }
 
+// GetIngressClassV1 returns the 'name' IngressClass resource
+func (s Store) GetIngressClassParamsV1Alpha1() (*kongv1alpha1.IngressClassParams, error) {
+	class, exists, err := s.stores.IngressClassV1.GetByKey(s.ingressClass)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrNotFound{fmt.Sprintf("IngressClass %s not found", s.ingressClass)}
+	}
+
+	ingressClass := class.(*networkingv1.IngressClass)
+	if ingressClass.Spec.Parameters == nil {
+		return nil, ErrNotFound{fmt.Sprintf("IngressClass %s doesn't reference any parameters", s.ingressClass)}
+	}
+
+	if *ingressClass.Spec.Parameters.APIGroup != kongv1alpha1.GroupVersion.Group {
+		return nil, ErrNotFound{fmt.Sprintf(
+			"IngressClass %s should reference parameters in apiGroup:%s",
+			s.ingressClass,
+			kongv1alpha1.GroupVersion.Group,
+		)}
+	}
+
+	if ingressClass.Spec.Parameters.Kind != kongv1alpha1.IngressClassParamsKind {
+		return nil, ErrNotFound{fmt.Sprintf(
+			"IngressClass %s should reference parameters with kind:%s",
+			s.ingressClass,
+			kongv1alpha1.IngressClassParamsKind,
+		)}
+	}
+
+	params, exists, err := s.stores.IngressClassParamsV1alpha1.GetByKey(ingressClass.Spec.Parameters.Name)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrNotFound{fmt.Sprintf("IngressClassParams %v not found", ingressClass.Spec.Parameters.Name)}
+	}
+	return params.(*kongv1alpha1.IngressClassParams), nil
+}
+
 // ListKongConsumers returns all KongConsumers filtered by the ingress.class
 // annotation.
 func (s Store) ListKongConsumers() []*kongv1.KongConsumer {
@@ -958,6 +1038,8 @@ func mkObjFromGVK(gvk schema.GroupVersionKind) (runtime.Object, error) {
 		return &kongv1.KongClusterPlugin{}, nil
 	case kongv1.SchemeGroupVersion.WithKind("KongConsumer"):
 		return &kongv1.KongConsumer{}, nil
+	case kongv1alpha1.SchemeGroupVersion.WithKind("IngressClassParams"):
+		return &kongv1alpha1.IngressClassParams{}, nil
 	// ----------------------------------------------------------------------------
 	// Knative APIs
 	// ----------------------------------------------------------------------------

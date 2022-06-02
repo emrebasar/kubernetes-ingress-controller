@@ -193,6 +193,15 @@ func setupControllers(
 			},
 		},
 		{
+			Enabled: c.IngressClassParamsEnabled,
+			Controller: &configuration.KongV1Alpha1IngressClassParamsReconciler{
+				Client:          mgr.GetClient(),
+				Log:             ctrl.Log.WithName("controllers").WithName("IngressClassParams"),
+				Scheme:          mgr.GetScheme(),
+				DataplaneClient: dataplaneClient,
+			},
+		},
+		{
 			Enabled: c.KongPluginEnabled,
 			Controller: &configuration.KongV1KongPluginReconciler{
 				Client:          mgr.GetClient(),

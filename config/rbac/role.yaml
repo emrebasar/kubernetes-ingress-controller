@@ -171,6 +171,22 @@ rules:
   - patch
   - update
 - apiGroups:
+  - configuration.konghq.com
+  resources:
+  - IngressClassParams
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - configuration.konghq.com
+  resources:
+  - IngressClassParams/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
   - extensions
   resources:
   - ingresses

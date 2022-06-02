@@ -13,6 +13,7 @@ import (
 
 	"github.com/kong/kubernetes-ingress-controller/v2/internal/annotations"
 	configurationv1 "github.com/kong/kubernetes-ingress-controller/v2/pkg/apis/configuration/v1"
+	configurationv1alpha1 "github.com/kong/kubernetes-ingress-controller/v2/pkg/apis/configuration/v1alpha1"
 	configurationv1beta1 "github.com/kong/kubernetes-ingress-controller/v2/pkg/apis/configuration/v1beta1"
 )
 
@@ -30,23 +31,24 @@ func clusterResourceKeyFunc(obj interface{}) (string, error) {
 
 // FakeObjects can be used to populate a fake Store.
 type FakeObjects struct {
-	IngressesV1beta1   []*networkingv1beta1.Ingress
-	IngressesV1        []*networkingv1.Ingress
-	IngressClassesV1   []*networkingv1.IngressClass
-	HTTPRoutes         []*gatewayv1alpha2.HTTPRoute
-	UDPRoutes          []*gatewayv1alpha2.UDPRoute
-	TCPRoutes          []*gatewayv1alpha2.TCPRoute
-	TLSRoutes          []*gatewayv1alpha2.TLSRoute
-	ReferencePolicies  []*gatewayv1alpha2.ReferencePolicy
-	TCPIngresses       []*configurationv1beta1.TCPIngress
-	UDPIngresses       []*configurationv1beta1.UDPIngress
-	Services           []*apiv1.Service
-	Endpoints          []*apiv1.Endpoints
-	Secrets            []*apiv1.Secret
-	KongPlugins        []*configurationv1.KongPlugin
-	KongClusterPlugins []*configurationv1.KongClusterPlugin
-	KongIngresses      []*configurationv1.KongIngress
-	KongConsumers      []*configurationv1.KongConsumer
+	IngressesV1beta1           []*networkingv1beta1.Ingress
+	IngressesV1                []*networkingv1.Ingress
+	IngressClassesV1           []*networkingv1.IngressClass
+	HTTPRoutes                 []*gatewayv1alpha2.HTTPRoute
+	UDPRoutes                  []*gatewayv1alpha2.UDPRoute
+	TCPRoutes                  []*gatewayv1alpha2.TCPRoute
+	TLSRoutes                  []*gatewayv1alpha2.TLSRoute
+	ReferencePolicies          []*gatewayv1alpha2.ReferencePolicy
+	TCPIngresses               []*configurationv1beta1.TCPIngress
+	UDPIngresses               []*configurationv1beta1.UDPIngress
+	IngressClassParamsV1alpha1 []*configurationv1alpha1.IngressClassParams
+	Services                   []*apiv1.Service
+	Endpoints                  []*apiv1.Endpoints
+	Secrets                    []*apiv1.Secret
+	KongPlugins                []*configurationv1.KongPlugin
+	KongClusterPlugins         []*configurationv1.KongClusterPlugin
+	KongIngresses              []*configurationv1.KongIngress
+	KongConsumers              []*configurationv1.KongConsumer
 
 	KnativeIngresses []*knative.Ingress
 }
@@ -74,6 +76,13 @@ func NewFakeStore(
 	ingressClassV1Store := cache.NewStore(clusterResourceKeyFunc)
 	for _, ingress := range objects.IngressClassesV1 {
 		err := ingressClassV1Store.Add(ingress)
+		if err != nil {
+			return nil, err
+		}
+	}
+	ingressClassParamsV1alpha1Store := cache.NewStore(clusterResourceKeyFunc)
+	for _, ingressClassParamsV1alpha1 := range objects.IngressClassParamsV1alpha1 {
+		err := ingressClassParamsV1alpha1Store.Add(ingressClassParamsV1alpha1)
 		if err != nil {
 			return nil, err
 		}
@@ -194,10 +203,11 @@ func NewFakeStore(
 			Endpoint:        endpointStore,
 			Secret:          secretsStore,
 
-			Plugin:        kongPluginsStore,
-			ClusterPlugin: kongClusterPluginsStore,
-			Consumer:      consumerStore,
-			KongIngress:   kongIngressStore,
+			Plugin:                     kongPluginsStore,
+			ClusterPlugin:              kongClusterPluginsStore,
+			Consumer:                   consumerStore,
+			KongIngress:                kongIngressStore,
+			IngressClassParamsV1alpha1: ingressClassParamsV1alpha1Store,
 
 			KnativeIngress: knativeIngressStore,
 		},
