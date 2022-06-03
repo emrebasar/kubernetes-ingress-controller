@@ -77,6 +77,14 @@ rules:
 - apiGroups:
   - configuration.konghq.com
   resources:
+  - IngressClassParams
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - configuration.konghq.com
+  resources:
   - kongclusterplugins
   verbs:
   - get
@@ -166,22 +174,6 @@ rules:
   - configuration.konghq.com
   resources:
   - udpingresses/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - configuration.konghq.com
-  resources:
-  - IngressClassParams
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - configuration.konghq.com
-  resources:
-  - IngressClassParams/status
   verbs:
   - get
   - patch
