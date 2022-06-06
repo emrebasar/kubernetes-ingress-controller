@@ -20,8 +20,10 @@ import (
 // Gateway Utilities
 // -----------------------------------------------------------------------------
 
-// maxConds is the maximum number of status conditions a Gateway can have at one time.
-const maxConds = 8
+const (
+	// maxConds is the maximum number of status conditions a Gateway can have at one time.
+	maxConds = 8
+)
 
 // isGatewayScheduled returns boolean whether or not the gateway object was scheduled
 // previously by the gateway controller.
@@ -52,39 +54,6 @@ func isGatewayReady(gateway *gatewayv1alpha2.Gateway) bool {
 func isGatewayInClassAndUnmanaged(gatewayClass *gatewayv1alpha2.GatewayClass, gateway gatewayv1alpha2.Gateway) bool {
 	_, ok := annotations.ExtractUnmanagedGatewayMode(gateway.Annotations)
 	return ok && gatewayClass.Spec.ControllerName == ControllerName
-}
-
-// convertListenersToListenerStatuses converts all the listeners from the given gateway
-// object into ListenerStatus objects.
-func convertListenersToListenerStatuses(gateway *gatewayv1alpha2.Gateway) (listenerStatuses []gatewayv1alpha2.ListenerStatus) {
-	existingListenerStatuses := make(map[gatewayv1alpha2.SectionName]gatewayv1alpha2.ListenerStatus, len(gateway.Status.Listeners))
-	for _, listenerStatus := range gateway.Status.Listeners {
-		existingListenerStatuses[listenerStatus.Name] = listenerStatus
-	}
-
-	for _, listener := range gateway.Spec.Listeners {
-		var attachedRoutes int32
-		var conditions = make([]metav1.Condition, 0)
-		if existingListenerStatus, ok := existingListenerStatuses[listener.Name]; ok {
-			attachedRoutes = existingListenerStatus.AttachedRoutes
-		}
-
-		listenerStatuses = append(listenerStatuses, gatewayv1alpha2.ListenerStatus{
-			Name:           listener.Name,
-			SupportedKinds: supportedRouteGroupKinds,
-			AttachedRoutes: attachedRoutes,
-			Conditions: append(conditions, metav1.Condition{
-				Type:               string(gatewayv1alpha2.ListenerConditionReady),
-				Status:             metav1.ConditionTrue,
-				ObservedGeneration: gateway.Generation,
-				LastTransitionTime: metav1.Now(),
-				Reason:             string(gatewayv1alpha2.ListenerReasonReady),
-				Message:            "the listener is ready and available for routing",
-			}),
-		})
-	}
-
-	return
 }
 
 // getRefFromPublishService splits a publish service string in the format namespace/name into a types.NamespacedName
@@ -125,14 +94,189 @@ func reconcileGatewaysIfClassMatches(gatewayClass client.Object, gateways []gate
 	return
 }
 
-// areAddressesEqual determines if two lists of gateway addresses have the same contents.
-func areAddressesEqual(l1 []gatewayv1alpha2.GatewayAddress, l2 []gatewayv1alpha2.GatewayAddress) bool {
-	return reflect.DeepEqual(l1, l2)
-}
+func getListenerStatus(
+	gateway *gatewayv1alpha2.Gateway,
+	kongListens []gatewayv1alpha2.Listener,
+) []gatewayv1alpha2.ListenerStatus {
+	statuses := []gatewayv1alpha2.ListenerStatus{}
+	protocols := map[gatewayv1alpha2.ProtocolType]map[gatewayv1alpha2.PortNumber]bool{}
 
-// areListenersEqual determines if two lists of gateway listeners have the same contents.
-func areListenersEqual(l1 []gatewayv1alpha2.Listener, l2 []gatewayv1alpha2.Listener) bool {
-	return reflect.DeepEqual(l1, l2)
+	existingListenerStatuses := make(map[gatewayv1alpha2.SectionName]gatewayv1alpha2.ListenerStatus, len(gateway.Status.Listeners))
+	for _, listenerStatus := range gateway.Status.Listeners {
+		existingListenerStatuses[listenerStatus.Name] = listenerStatus
+	}
+
+	for _, listen := range kongListens {
+		_, ok := protocols[listen.Protocol]
+		if !ok {
+			protocols[listen.Protocol] = map[gatewayv1alpha2.PortNumber]bool{}
+		}
+		protocols[listen.Protocol][listen.Port] = true
+	}
+
+	portsToProtocol := make(map[gatewayv1alpha2.PortNumber]gatewayv1alpha2.ProtocolType, len(gateway.Spec.Listeners))
+	portsToHostnames := make(map[gatewayv1alpha2.PortNumber]map[gatewayv1alpha2.Hostname]gatewayv1alpha2.SectionName,
+		len(gateway.Spec.Listeners))
+
+	// we need to run through listeners with existing no conflict statuses first
+	// they take precedence in the event of a conflict later. we do not perform conflict checks here, only that
+	// the current status is not conflicted. we assume the next section will have inserted the correct status
+	for _, listener := range gateway.Spec.Listeners {
+		if existingListenerStatus, ok := existingListenerStatuses[listener.Name]; ok {
+			for _, condition := range existingListenerStatus.Conditions {
+				if condition.Type == string(gatewayv1alpha2.ListenerConditionConflicted) &&
+					condition.Status == metav1.ConditionFalse {
+					if _, ok := portsToProtocol[listener.Port]; !ok {
+						portsToProtocol[listener.Port] = listener.Protocol
+					}
+					if listener.Protocol == gatewayv1alpha2.HTTPProtocolType ||
+						listener.Protocol == gatewayv1alpha2.HTTPSProtocolType ||
+						listener.Protocol == gatewayv1alpha2.TLSProtocolType {
+						if _, ok := portsToHostnames[listener.Port]; !ok {
+							portsToHostnames[listener.Port] = make(map[gatewayv1alpha2.Hostname]gatewayv1alpha2.SectionName)
+						}
+						var hostname gatewayv1alpha2.Hostname
+						if listener.Hostname == nil {
+							hostname = gatewayv1alpha2.Hostname("")
+						} else {
+							hostname = *listener.Hostname
+						}
+						portsToHostnames[listener.Port][hostname] = listener.Name
+					}
+				}
+			}
+		}
+	}
+
+	for _, listener := range gateway.Spec.Listeners {
+		var attachedRoutes int32
+		if existingListenerStatus, ok := existingListenerStatuses[listener.Name]; ok {
+			attachedRoutes = existingListenerStatus.AttachedRoutes
+		}
+		status := gatewayv1alpha2.ListenerStatus{
+			Name:           listener.Name,
+			Conditions:     []metav1.Condition{},
+			SupportedKinds: supportedRouteGroupKinds,
+			AttachedRoutes: attachedRoutes,
+		}
+		// TODO this only handles some Listener conditions and reasons as needed to check cross-listener compatibility
+		// and unattachability due to missing Kong configuration. There are others available and it may be appropriate
+		// for us to add them https://github.com/Kong/kubernetes-ingress-controller/issues/2558
+		if _, ok := portsToProtocol[listener.Port]; !ok {
+			portsToProtocol[listener.Port] = listener.Protocol
+		} else {
+			// Either each Listener within the group specifies the “HTTP” Protocol or each Listener within the group
+			// specifies either the “HTTPS” or “TLS” Protocol.
+			// TCP and UDP listeners must always use unique ports
+			if portsToProtocol[listener.Port] == gatewayv1alpha2.TCPProtocolType ||
+				portsToProtocol[listener.Port] == gatewayv1alpha2.UDPProtocolType {
+				status.Conditions = append(status.Conditions, metav1.Condition{
+					Type:               string(gatewayv1alpha2.ListenerConditionConflicted),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: gateway.Generation,
+					// TODO we should check transition time rather than always nowing
+					// https://github.com/Kong/kubernetes-ingress-controller/issues/2556
+					LastTransitionTime: metav1.Now(),
+					// TODO confirm upstream. this sounds a bit odd since it's maybe same protocol, they just can't
+					// share a port. this sounds more correct than HostnameConflict though. there are no conformance
+					// tests yet
+					Reason: string(gatewayv1alpha2.ListenerReasonProtocolConflict),
+				})
+			} else if portsToProtocol[listener.Port] == listener.Protocol ||
+				listener.Protocol == gatewayv1alpha2.HTTPSProtocolType && portsToProtocol[listener.Port] == gatewayv1alpha2.TLSProtocolType ||
+				listener.Protocol == gatewayv1alpha2.TLSProtocolType && portsToProtocol[listener.Port] == gatewayv1alpha2.HTTPSProtocolType {
+				if _, ok := portsToHostnames[listener.Port]; !ok {
+					portsToHostnames[listener.Port] = make(map[gatewayv1alpha2.Hostname]gatewayv1alpha2.SectionName)
+				}
+				// Each Listener within the group specifies a Hostname that is unique within the group.
+				// As a special case, one Listener within a group may omit Hostname, in which case this Listener
+				// matches when no other Listener matches.
+				var hostname gatewayv1alpha2.Hostname
+				if listener.Hostname == nil {
+					hostname = gatewayv1alpha2.Hostname("")
+				} else {
+					hostname = *listener.Hostname
+				}
+				if _, exists := portsToHostnames[listener.Port][hostname]; !exists {
+					portsToHostnames[listener.Port][hostname] = listener.Name
+				} else {
+					// ignore if we already added ourselves when handling existing
+					if !(portsToHostnames[listener.Port][hostname] == listener.Name) {
+						status.Conditions = append(status.Conditions, metav1.Condition{
+							Type:               string(gatewayv1alpha2.ListenerConditionConflicted),
+							Status:             metav1.ConditionTrue,
+							ObservedGeneration: gateway.Generation,
+							LastTransitionTime: metav1.Now(),
+							Reason:             string(gatewayv1alpha2.ListenerReasonHostnameConflict),
+						})
+					}
+				}
+			} else {
+				status.Conditions = append(status.Conditions, metav1.Condition{
+					Type:               string(gatewayv1alpha2.ListenerConditionConflicted),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: gateway.Generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             string(gatewayv1alpha2.ListenerReasonProtocolConflict),
+				})
+			}
+		}
+
+		if len(protocols[listener.Protocol]) == 0 {
+			status.Conditions = append(status.Conditions, metav1.Condition{
+				Type:               string(gatewayv1alpha2.ListenerConditionDetached),
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: gateway.Generation,
+				LastTransitionTime: metav1.Now(),
+				Reason:             string(gatewayv1alpha2.ListenerReasonUnsupportedProtocol),
+				Message:            "no Kong listen with the requested protocol is configured",
+			})
+		}
+		if _, ok := protocols[listener.Protocol][listener.Port]; !ok {
+			status.Conditions = append(status.Conditions, metav1.Condition{
+				Type:               string(gatewayv1alpha2.ListenerConditionDetached),
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: gateway.Generation,
+				LastTransitionTime: metav1.Now(),
+				Reason:             string(gatewayv1alpha2.ListenerReasonPortUnavailable),
+				Message:            "no Kong listen with the requested protocol is configured for the requested port",
+			})
+		}
+		// if we've gotten this far with no conditions, the listener is good to go
+		if len(status.Conditions) == 0 {
+			status.Conditions = append(status.Conditions,
+				metav1.Condition{
+					Type:               string(gatewayv1alpha2.ListenerConditionConflicted),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: gateway.Generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             string(gatewayv1alpha2.ListenerReasonNoConflicts),
+				},
+				metav1.Condition{
+					Type:               string(gatewayv1alpha2.ListenerConditionReady),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: gateway.Generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             string(gatewayv1alpha2.ListenerReasonReady),
+					Message:            "the listener is ready and available for routing",
+				},
+			)
+		} else {
+			// unsure if we want to add the ready=false condition on a per-failure basis or use this else to just mark
+			// it generic unready if we hit anything bad. do any failure conditions block readiness? do we care about
+			// having distinct ready false messages, assuming we have more descriptive messages in the other conditions?
+			status.Conditions = append(status.Conditions, metav1.Condition{
+				Type:               string(gatewayv1alpha2.ListenerConditionReady),
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: gateway.Generation,
+				LastTransitionTime: metav1.Now(),
+				Reason:             string(gatewayv1alpha2.ListenerReasonPending),
+				Message:            "the listener is not ready and cannot route requests",
+			})
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses
 }
 
 // -----------------------------------------------------------------------------
