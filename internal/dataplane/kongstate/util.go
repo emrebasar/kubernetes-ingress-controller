@@ -7,8 +7,10 @@ import (
 
 	"github.com/ghodss/yaml"
 	"github.com/kong/go-kong/kong"
+	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	"github.com/kong/kubernetes-ingress-controller/v2/internal/annotations"
 	"github.com/kong/kubernetes-ingress-controller/v2/internal/store"
@@ -48,23 +50,47 @@ func getKongIngressForServices(
 	return nil, nil
 }
 
-func getKongIngressFromObjectMeta(s store.Storer, obj *util.K8sObjectInfo) (
-	*configurationv1.KongIngress, error) {
-	return getKongIngressFromIngressAnnotations(s, obj.Namespace, obj.Name, obj.Annotations)
+func getKongIngressFromObjectMeta(
+	log logrus.FieldLogger,
+	s store.Storer,
+	obj util.K8sObjectInfo,
+) (
+	*configurationv1.KongIngress, error,
+) {
+	return getKongIngressFromIngressAnnotations(log, s, obj)
 }
 
-func getKongIngressFromIngressAnnotations(s store.Storer, namespace, name string,
-	anns map[string]string) (
-	*configurationv1.KongIngress, error) {
-	confName := annotations.ExtractConfigurationName(anns)
+func getKongIngressFromIngressAnnotations(
+	log logrus.FieldLogger,
+	s store.Storer,
+	obj util.K8sObjectInfo,
+) (
+	*configurationv1.KongIngress, error,
+) {
+	// Check if we're trying to get KongIngress configuration based on an annotation
+	// on Gateway API *Route object and if that's the case then skip it since those
+	// should not be affected by said annotation.
+	if gvk := obj.GroupVersionKind; gvk.Group == gatewayv1alpha2.GroupName {
+		switch gvk.Kind {
+		case "HTTPRoute", "UDPRoute", "TCPRoute", "TLSRoute":
+			log.WithFields(logrus.Fields{
+				"resource_name":      obj.Name,
+				"resource_namespace": obj.Namespace,
+				"resource_kind":      gvk.Kind,
+			}).Warn("KongIngress annotation is non-actionable on Gateway API *Route objects.")
+			return nil, nil
+		}
+	}
+
+	confName := annotations.ExtractConfigurationName(obj.Annotations)
 	if confName != "" {
-		ki, err := s.GetKongIngress(namespace, confName)
+		ki, err := s.GetKongIngress(obj.Namespace, confName)
 		if err == nil {
 			return ki, nil
 		}
 	}
 
-	ki, err := s.GetKongIngress(namespace, name)
+	ki, err := s.GetKongIngress(obj.Namespace, obj.Name)
 	if err == nil {
 		return ki, nil
 	}

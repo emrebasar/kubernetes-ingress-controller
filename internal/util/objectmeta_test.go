@@ -11,7 +11,7 @@ import (
 func TestFromK8sObject(t *testing.T) {
 	for _, tt := range []struct {
 		name string
-		in   metav1.Object
+		in   ObjMetaTyper
 		want K8sObjectInfo
 	}{
 		{
@@ -46,7 +46,7 @@ func TestFromK8sObject(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got := FromK8sObject(tt.in)
-			assert.Equal(t, tt.want, got)
+			assert.EqualValues(t, tt.want, got)
 		})
 	}
 }

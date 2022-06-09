@@ -147,7 +147,7 @@ func (ks *KongState) FillOverrides(log logrus.FieldLogger, s store.Storer) {
 
 		// Routes
 		for j := 0; j < len(ks.Services[i].Routes); j++ {
-			kongIngress, err := getKongIngressFromObjectMeta(s, &ks.Services[i].Routes[j].Ingress)
+			kongIngress, err := getKongIngressFromObjectMeta(log, s, ks.Services[i].Routes[j].Ingress)
 			if err != nil {
 				log.WithFields(logrus.Fields{
 					"resource_name":      ks.Services[i].Routes[j].Ingress.Name,
